@@ -1,10 +1,16 @@
-# AgentX
+<p align="center">
+  <img src="assets/agentx-logo.png" alt="AgentX logo" width="180">
+</p>
 
-[![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-00d7ff?style=flat-square)](https://github.com/VignetteApril/agentx)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![tmux 3.2+](https://img.shields.io/badge/tmux-3.2%2B-1BB91F?style=flat-square&logo=tmux&logoColor=white)](https://github.com/tmux/tmux)
-![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-8b5cf6?style=flat-square)
-![Local-only context](https://img.shields.io/badge/context-local--only-6b7280?style=flat-square&logo=shield&logoColor=white)
+<h1 align="center">AgentX</h1>
+
+<p align="center">
+  <a href="https://github.com/VignetteApril/agentx"><img src="https://img.shields.io/badge/version-0.5.0-00d7ff?style=flat-square" alt="Version 0.5.0"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.9+"></a>
+  <a href="https://github.com/tmux/tmux"><img src="https://img.shields.io/badge/tmux-3.2%2B-1BB91F?style=flat-square&amp;logo=tmux&amp;logoColor=white" alt="tmux 3.2+"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-8b5cf6?style=flat-square" alt="macOS and Linux">
+  <img src="https://img.shields.io/badge/context-local--only-6b7280?style=flat-square&amp;logo=shield&amp;logoColor=white" alt="Local-only context">
+</p>
 
 AgentX is a friendly tmux-based session manager for working with multiple coding agents in one project.
 
