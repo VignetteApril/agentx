@@ -1,5 +1,11 @@
 # AgentX
 
+[![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-00d7ff?style=flat-square)](https://github.com/VignetteApril/agentx)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![tmux 3.2+](https://img.shields.io/badge/tmux-3.2%2B-1BB91F?style=flat-square&logo=tmux&logoColor=white)](https://github.com/tmux/tmux)
+![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-8b5cf6?style=flat-square)
+![Local-only context](https://img.shields.io/badge/context-local--only-6b7280?style=flat-square&logo=shield&logoColor=white)
+
 AgentX is a friendly tmux-based session manager for working with multiple coding agents in one project.
 
 It keeps each agent alive in its own tmux window, gives every Codex profile an isolated login, and makes it easy to pass reliable project context from one agent to another. You keep the native Codex or AGY interface; AgentX simply adds session management, context transfer, recovery tools, and a compact terminal UI around it.
