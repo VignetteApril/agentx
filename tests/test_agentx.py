@@ -147,6 +147,10 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn(
             ("set-option", "-t", "example", "status-justify", "absolute-centre"), calls
         )
+        self.assertIn(
+            ("set-option", "-t", "example", "window-status-style",
+             "fg=colour252,bg=colour239"), calls
+        )
 
     def test_session_frame_can_be_disabled(self):
         original_tmux = agentx.tmux

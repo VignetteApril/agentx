@@ -330,7 +330,7 @@ def configure_session(session: str, project: Path, config: dict[str, Any]) -> No
         ("status-style", "bg=colour233,fg=colour250"),
         ("message-style", "bg=colour17,fg=colour51,bold"),
         ("mode-style", "bg=colour54,fg=colour231,bold"),
-        ("window-status-style", "fg=colour244,bg=colour233"),
+        ("window-status-style", "fg=colour252,bg=colour239"),
         ("window-status-current-style", "fg=colour16,bg=colour51,bold"),
         ("window-status-format", " #I  #W "),
         ("window-status-current-format", " #[fg=colour16]◆ #I  #W "),
