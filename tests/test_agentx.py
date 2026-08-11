@@ -279,6 +279,11 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn(
             ("bind-key", "-T", "root", "M-1", "send-keys", "M-1"), calls
         )
+        for profile in ("codex-1", "codex-2"):
+            self.assertIn(
+                ("set-window-option", "-t", f"example:{profile}",
+                 "window-status-style", "fg=colour252,bg=colour239"), calls
+            )
 
         prefix_one = next(
             call for call in calls if call[:4] == ("bind-key", "-T", "prefix", "1")

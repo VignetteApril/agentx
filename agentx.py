@@ -316,6 +316,14 @@ def configure_status_spacing(session: str) -> None:
 def configure_session(session: str, project: Path, config: dict[str, Any]) -> None:
     settings = config.get("settings", {})
     prefix = str(settings.get("prefix") or "C-g")
+    configured_profiles = profiles(config)
+    window_tab_options = {
+        "window-status-style",
+        "window-status-current-style",
+        "window-status-format",
+        "window-status-current-format",
+        "window-status-separator",
+    }
     opts = [
         ("base-index", "1"),
         ("pane-base-index", "1"),
@@ -347,6 +355,10 @@ def configure_session(session: str, project: Path, config: dict[str, Any]) -> No
     ]
     for key, value in opts:
         tmux("set-option", "-t", session, key, value)
+        if key in window_tab_options:
+            for profile in configured_profiles:
+                tmux("set-window-option", "-t", f"{session}:{profile.name}", key, value,
+                     check=False)
 
     frame_enabled = bool(settings.get("frame_enabled", True))
     frame_color = str(settings.get("frame_color") or "colour51")
@@ -407,8 +419,6 @@ def configure_session(session: str, project: Path, config: dict[str, Any]) -> No
     # Use the module path rather than sys.argv[0]: configure_session is also
     # called by installers/tests/hot-update helpers where argv[0] may be `-c`.
     executable = str(Path(__file__).resolve())
-    configured_profiles = profiles(config)
-
     # Key tables are global to a tmux server. Keep every binding project-agnostic
     # and resolve the project from the session where the key was pressed.
     prompt_switch_base = shell_join_command([executable, "prompt-switch"])
