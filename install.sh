@@ -14,6 +14,12 @@ chmod +x "$TARGET"
 
 echo "Installed agentx -> $TARGET"
 
+# tmux key tables are server-global and survive binary upgrades. Refresh every
+# live AgentX session so newly installed shortcuts take effect immediately.
+if command -v tmux >/dev/null 2>&1; then
+  "$TARGET" reconfigure || true
+fi
+
 if ! command -v tmux >/dev/null 2>&1; then
   echo
   echo "tmux is required and was not found."

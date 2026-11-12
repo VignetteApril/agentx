@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import subprocess
 import tempfile
 import unittest
@@ -7,8 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from agentxlib.theme import Theme
-from agentxlib.ui import human_age, render_dashboard, render_statusline
+from agentxlib.cockpit import (CockpitAction, CockpitAgent, CockpitState, _read_key,
+                               reduce_cockpit_key, render_cockpit)
+from agentxlib.theme import AGENTX_PALETTE, Theme
+from agentxlib.ui import display_width, human_age, render_dashboard, render_statusline
+from agentxlib.memory import add_memory, context_memory, format_memory_section, initialise_memory, search_memory
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "agentx.py"
 spec = importlib.util.spec_from_file_location("agentx_module", MODULE_PATH)
@@ -19,6 +23,21 @@ spec.loader.exec_module(agentx)
 
 
 class AgentXPureTests(unittest.TestCase):
+    def test_agentx_palette_contract_and_legacy_aliases(self):
+        palette = AGENTX_PALETTE
+        self.assertEqual(
+            (palette.background, palette.surface, palette.border, palette.primary,
+             palette.secondary, palette.text, palette.muted, palette.success,
+             palette.warning, palette.danger),
+            ("colour233", "colour234", "colour238", "colour51", "colour141",
+             "colour252", "colour244", "colour48", "colour220", "colour203"),
+        )
+        self.assertEqual(palette.tmux_color("accent"), palette.primary)
+        self.assertEqual(palette.tmux_color("panel"), palette.border)
+        self.assertEqual(palette.tmux_color("bg"), palette.background)
+        self.assertEqual(palette.tmux_color("bold"), palette.text)
+        self.assertEqual(palette.tmux_color("inverse"), palette.primary)
+
     def test_session_name_is_stable(self):
         p = Path("/tmp/example-project")
         self.assertEqual(agentx.session_name(p), agentx.session_name(p))
@@ -39,6 +58,67 @@ class AgentXPureTests(unittest.TestCase):
         for value in ("colour256", "#12345", "fg=red", "red,bg=black", ""):
             self.assertFalse(agentx.valid_tmux_color(value))
 
+    def test_cockpit_popup_is_fullscreen_and_tmux_32_compatible(self):
+        parts = agentx.cockpit_popup_args()
+        self.assertEqual(parts[:6],
+                         ["display-popup", "-w", "100%", "-h", "100%", "-E"])
+        self.assertEqual(len(parts), 7)
+        command = parts[6]
+        self.assertIn("cockpit", command)
+        self.assertIn('--session "#{session_name}"', command)
+        self.assertIn('--current "#{window_name}"', command)
+        self.assertIn('--client "#{client_name}"', command)
+        self.assertNotIn("-B", parts)
+
+    def test_attach_queues_cockpit_outside_and_inside_tmux(self):
+        original_exec = agentx.os.execvp
+        original_tmux = agentx.tmux
+        previous_tmux = os.environ.get("TMUX")
+        exec_calls = []
+        tmux_calls = []
+        try:
+            os.environ.pop("TMUX", None)
+            agentx.os.execvp = lambda program, parts: exec_calls.append((program, parts))
+            agentx.attach_session("agentx-demo", cockpit=True)
+
+            os.environ["TMUX"] = "/tmp/tmux,1,0"
+            agentx.tmux = lambda *parts, **kwargs: tmux_calls.append(parts)
+            agentx.attach_session("agentx-demo", cockpit=True)
+        finally:
+            agentx.os.execvp = original_exec
+            agentx.tmux = original_tmux
+            if previous_tmux is None:
+                os.environ.pop("TMUX", None)
+            else:
+                os.environ["TMUX"] = previous_tmux
+
+        self.assertEqual(exec_calls[0][0], "tmux")
+        self.assertEqual(exec_calls[0][1][:5],
+                         ["tmux", "attach-session", "-t", "agentx-demo", ";"])
+        self.assertEqual(exec_calls[0][1][5:11], agentx.cockpit_popup_args()[:6])
+        self.assertEqual(tmux_calls[0][:4], ("switch-client", "-t", "agentx-demo", ";"))
+        self.assertEqual(list(tmux_calls[0][4:10]), agentx.cockpit_popup_args()[:6])
+
+    def test_deferred_cockpit_switch_targets_only_the_invoking_client(self):
+        original_tmux = agentx.tmux
+        calls = []
+        try:
+            agentx.tmux = lambda *parts, **kwargs: calls.append(parts)
+            agentx.schedule_window_switch(
+                "agentx-demo:codex-2", "Switched", "/dev/ttys009"
+            )
+            agentx.schedule_window_switch("agentx-demo:codex-1", "Switched")
+        finally:
+            agentx.tmux = original_tmux
+
+        client_command = calls[0][2]
+        self.assertIn(
+            "tmux switch-client -c /dev/ttys009 -t agentx-demo:codex-2",
+            client_command,
+        )
+        self.assertNotIn("select-window", client_command)
+        self.assertIn("tmux select-window -t agentx-demo:codex-1", calls[1][2])
+
     def test_codex_launch_command_uses_separate_home(self):
         p = agentx.Profile("codex-1", "codex", "codex", 0)
         cmd = agentx.launch_command(p, resume=False)
@@ -46,6 +126,8 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn("codex-home", cmd)
         self.assertIn("Press Enter to resume", cmd)
         self.assertIn("read -r agentx_recovery_input", cmd)
+        self.assertIn("@agentx_state running", cmd)
+        self.assertIn("@agentx_state exited", cmd)
 
     def test_codex_resume_command(self):
         p = agentx.Profile("codex-1", "codex", "codex", 0)
@@ -89,6 +171,132 @@ class AgentXPureTests(unittest.TestCase):
         self.assertEqual(result, agentx.session_name(Path("/tmp/existing")))
         self.assertEqual(len(calls), 1)
 
+    def test_open_defaults_to_cockpit_but_explicit_profile_bypasses_it(self):
+        config = {
+            "profiles": [
+                {"name": "codex-1", "kind": "codex", "command": "codex"},
+                {"name": "codex-2", "kind": "codex", "command": "codex"},
+            ],
+            "settings": {},
+        }
+        project = Path("/tmp/project")
+        originals = {
+            "load_config": agentx.load_config,
+            "project_path": agentx.project_path,
+            "create_session": agentx.create_session,
+            "active_agent": agentx.active_agent,
+            "update_project": agentx.update_project,
+            "attach_session": agentx.attach_session,
+        }
+        attachments = []
+        try:
+            agentx.load_config = lambda: config
+            agentx.project_path = lambda value=None: project
+            agentx.create_session = lambda *parts, **kwargs: "example-session"
+            agentx.active_agent = lambda session: "codex-1"
+            agentx.update_project = lambda *parts, **kwargs: None
+            agentx.attach_session = lambda session, window=None, cockpit=False: attachments.append(
+                (session, window, cockpit)
+            )
+            agentx.cmd_open(SimpleNamespace(project=str(project), profile=None, resume=False))
+            agentx.cmd_open(SimpleNamespace(
+                project=str(project), profile="codex-2", resume=False,
+            ))
+        finally:
+            for name, value in originals.items():
+                setattr(agentx, name, value)
+
+        self.assertEqual(attachments, [
+            ("example-session", None, True),
+            ("example-session", "codex-2", False),
+        ])
+
+    def test_cockpit_switch_updates_project_and_defers_window_selection(self):
+        config = {
+            "profiles": [
+                {"name": "codex-1", "kind": "codex", "command": "codex"},
+                {"name": "codex-2", "kind": "codex", "command": "codex"},
+            ],
+            "settings": {},
+        }
+        originals = {
+            "runtime_project": agentx.runtime_project,
+            "load_config": agentx.load_config,
+            "current_window_states": agentx.current_window_states,
+            "run_cockpit": agentx.run_cockpit,
+            "update_project": agentx.update_project,
+            "schedule_window_switch": agentx.schedule_window_switch,
+        }
+        updates = []
+        switches = []
+        try:
+            agentx.runtime_project = lambda project=None, session=None: Path("/tmp/project")
+            agentx.load_config = lambda: config
+            agentx.current_window_states = lambda session: [
+                {"name": "codex-1", "dead": "0"},
+                {"name": "codex-2", "dead": "0"},
+            ]
+            agentx.run_cockpit = lambda *parts, **kwargs: CockpitAction(
+                "switch", "codex-2"
+            )
+            agentx.update_project = lambda *parts, **kwargs: updates.append(kwargs)
+            agentx.schedule_window_switch = lambda *parts: switches.append(parts)
+            agentx.cmd_cockpit(SimpleNamespace(
+                session="example", current="codex-1", client="/dev/ttys001",
+            ))
+        finally:
+            for name, value in originals.items():
+                setattr(agentx, name, value)
+
+        self.assertEqual(updates[0]["previous_agent"], "codex-1")
+        self.assertEqual(updates[0]["active_agent"], "codex-2")
+        self.assertEqual(switches[0][0], "example:codex-2")
+        self.assertEqual(switches[0][2], "/dev/ttys001")
+
+    def test_cockpit_transfer_failure_reopens_with_notice(self):
+        config = {
+            "profiles": [
+                {"name": "codex-1", "kind": "codex", "command": "codex"},
+                {"name": "codex-2", "kind": "codex", "command": "codex"},
+            ],
+            "settings": {},
+        }
+        originals = {
+            "runtime_project": agentx.runtime_project,
+            "load_config": agentx.load_config,
+            "current_window_states": agentx.current_window_states,
+            "run_cockpit": agentx.run_cockpit,
+            "cmd_transfer": agentx.cmd_transfer,
+        }
+        actions = iter([CockpitAction("transfer", "codex-2"), CockpitAction("close")])
+        notices = []
+        transfers = []
+        try:
+            agentx.runtime_project = lambda project=None, session=None: Path("/tmp/project")
+            agentx.load_config = lambda: config
+            agentx.current_window_states = lambda session: [
+                {"name": "codex-1", "dead": "0"},
+                {"name": "codex-2", "dead": "0"},
+            ]
+            def fake_cockpit(*parts, **kwargs):
+                notices.append(kwargs.get("notice"))
+                return next(actions)
+            agentx.run_cockpit = fake_cockpit
+            def fail_transfer(args):
+                transfers.append(args)
+                raise agentx.AgentXError("injection failed")
+            agentx.cmd_transfer = fail_transfer
+            agentx.cmd_cockpit(SimpleNamespace(
+                session="example", current="codex-1", client="/dev/ttys001",
+            ))
+        finally:
+            for name, value in originals.items():
+                setattr(agentx, name, value)
+
+        self.assertTrue(transfers[0].defer_switch)
+        self.assertEqual(transfers[0].source, "codex-1")
+        self.assertEqual(notices, [None, "Transfer failed: injection failed"])
+
     def test_session_configures_dead_pane_recovery(self):
         original_tmux = agentx.tmux
         original_argv0 = sys.argv[0]
@@ -105,16 +313,48 @@ class AgentXPureTests(unittest.TestCase):
             sys.argv[0] = original_argv0
         self.assertIn(
             ("set-option", "-t", "example", "remain-on-exit-format",
-             "Agent exited (status #{pane_dead_status}). Press Ctrl+G R to resume this Agent."),
+             "Agent exited (status #{pane_dead_status}). Press Ctrl+G R to resume all exited Agents."),
             calls,
         )
         recovery = next(call for call in calls if call[:4] == ("bind-key", "-T", "prefix", "R"))
         self.assertEqual(recovery[4:7],
                          ("if-shell", "-F", "#{m/r:^agentx-,#{session_name}}"))
         self.assertIn("recover", recovery[7])
-        self.assertIn("#W", recovery[7])
+        self.assertIn("--all", recovery[7])
         self.assertIn('--session "#{session_name}"', recovery[7])
         self.assertNotIn("/tmp/project", recovery[7])
+
+    def test_tmux_32_newer_cosmetic_options_are_best_effort(self):
+        original_tmux = agentx.tmux
+        calls = []
+
+        def fake_tmux(*parts, **kwargs):
+            calls.append((parts, kwargs))
+
+        try:
+            agentx.tmux = fake_tmux
+            agentx.configure_session("example", Path("/tmp/project"), {
+                "profiles": [],
+                "settings": {},
+            })
+        finally:
+            agentx.tmux = original_tmux
+
+        optional = {
+            "remain-on-exit-format",
+            "popup-style",
+            "popup-border-style",
+            "menu-style",
+            "menu-selected-style",
+        }
+        option_calls = {
+            parts[3]: kwargs
+            for parts, kwargs in calls
+            if parts[:3] == ("set-option", "-t", "example") and len(parts) >= 5
+        }
+        for name in optional:
+            self.assertEqual(option_calls[name], {"check": False, "capture": True})
+        self.assertEqual(option_calls["status-style"], {})
 
     def test_session_adds_configurable_agent_frame(self):
         original_tmux = agentx.tmux
@@ -138,18 +378,35 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn("#22d3ee", frame_format)
         self.assertIn("#111827", frame_format)
         self.assertIn("project", frame_format)
+        self.assertIn("╭── ", frame_format)
+        self.assertIn("#{R:─,", frame_format)
+        self.assertIn("#{pane_width}", frame_format)
+        self.assertIn("#{w:window_name}", frame_format)
+        self.assertIn("#{w:#{b:@agentx_project}}", frame_format)
+        self.assertIn("╮", frame_format)
+        self.assertIn("#{e|+:11,", frame_format)
         self.assertNotIn("AGENTX", frame_format)
         self.assertNotIn("pane_current_command", frame_format)
+        self.assertNotIn("nobold", frame_format)
+        self.assertNotIn("align=left,bg=", frame_format)
         self.assertNotIn("┏", frame_format)
         self.assertIn(
-            ("set-window-option", "-t", "example:0", "pane-border-lines", "single"), calls
+            ("set-window-option", "-t", "example:0", "pane-border-lines", "spaces"), calls
         )
         self.assertIn(
-            ("set-option", "-t", "example", "status-justify", "absolute-centre"), calls
+            ("set-window-option", "-t", "example:0", "pane-active-border-style",
+             "fg=colour238,bg=#111827"), calls
+        )
+        self.assertIn(
+            ("set-option", "-t", "example", "status-justify", "left"), calls
         )
         self.assertIn(
             ("set-option", "-t", "example", "window-status-style",
-             "fg=colour252,bg=colour239"), calls
+             "fg=colour244,bg=#20242e"), calls
+        )
+        self.assertIn(
+            ("set-option", "-t", "example", "popup-border-style",
+             "fg=colour233,bg=colour233"), calls
         )
 
     def test_session_frame_can_be_disabled(self):
@@ -166,36 +423,54 @@ class AgentXPureTests(unittest.TestCase):
             ("set-window-option", "-t", "example:0", "pane-border-status", "off"), calls
         )
 
-    def test_four_sided_frame_adds_input_disabled_helper_panes(self):
+    def test_frame_does_not_add_decoration_panes(self):
         original_tmux = agentx.tmux
         calls = []
-        pane_ids = iter(("%2", "%3", "%4"))
 
         def fake_tmux(*parts, **kwargs):
             calls.append(parts)
             if parts[0] == "list-panes":
                 return SimpleNamespace(returncode=0, stdout="%1\t1\t\n")
-            if parts[0] == "split-window":
-                return SimpleNamespace(returncode=0, stdout=next(pane_ids) + "\n")
             return SimpleNamespace(returncode=0, stdout="")
 
         try:
             agentx.tmux = fake_tmux
-            agentx.configure_window_frame("example:1", True)
+            agentx.configure_window_frame("example:1", True, "black")
         finally:
             agentx.tmux = original_tmux
 
         self.assertIn(("set-option", "-p", "-t", "%1", "@agentx_role", "main"), calls)
-        for pane_id, role in (("%2", "left"), ("%3", "right"), ("%4", "bottom")):
-            self.assertIn(("set-option", "-p", "-t", pane_id, "@agentx_role", role), calls)
-            self.assertIn(("select-pane", "-d", "-t", pane_id), calls)
-        splits = [call for call in calls if call[0] == "split-window"]
-        self.assertEqual(len(splits), 3)
-        self.assertTrue(all(("-l", "1") == call[call.index("-l"):call.index("-l") + 2]
-                            for call in splits))
-        self.assertTrue(any(call[:4] == ("set-hook", "-w", "-t", "example:1")
-                            and "after-select-pane" in call for call in calls))
+        self.assertIn(("set-window-option", "-t", "example:1", "window-style", "bg=black"), calls)
+        self.assertIn(("set-option", "-p", "-t", "%1", "window-style", "bg=default"), calls)
+        self.assertFalse(any(call[0] == "split-window" for call in calls))
+        self.assertIn(("set-hook", "-wu", "-t", "example:1", "window-resized"), calls)
+        self.assertIn(("set-hook", "-wu", "-t", "example:1", "after-select-pane"), calls)
         self.assertIn(("select-pane", "-t", "%1"), calls)
+
+    def test_existing_gutters_are_removed_without_replacing_agent_pane(self):
+        original_tmux = agentx.tmux
+        calls = []
+
+        def fake_tmux(*parts, **kwargs):
+            calls.append(parts)
+            if parts[0] == "list-panes":
+                return SimpleNamespace(returncode=0, stdout=(
+                    "%1\t1\tmain\n%2\t0\tleft\n%3\t0\tright\n%4\t0\tbottom\n"
+                ))
+            return SimpleNamespace(returncode=0, stdout="")
+
+        try:
+            agentx.tmux = fake_tmux
+            agentx.configure_window_frame("example:1", True, "black")
+        finally:
+            agentx.tmux = original_tmux
+
+        self.assertIn(("kill-pane", "-t", "%2"), calls)
+        self.assertIn(("kill-pane", "-t", "%3"), calls)
+        self.assertIn(("kill-pane", "-t", "%4"), calls)
+        self.assertFalse(any(call[:2] == ("kill-pane", "-t") and call[2] == "%1"
+                             for call in calls))
+        self.assertFalse(any(call[0] == "split-window" for call in calls))
 
     def test_agent_commands_target_main_pane_inside_frame(self):
         original_tmux = agentx.tmux
@@ -208,32 +483,16 @@ class AgentXPureTests(unittest.TestCase):
         finally:
             agentx.tmux = original_tmux
 
-    def test_status_spacing_centres_default_bar_between_transparent_rows(self):
+    def test_status_spacing_uses_a_single_line_footer(self):
         original_tmux = agentx.tmux
         calls = []
-
-        def fake_tmux(*parts, **kwargs):
-            calls.append(parts)
-            if parts[0] == "show-options":
-                return SimpleNamespace(returncode=0, stdout="DEFAULT STATUS FORMAT\n")
-            return SimpleNamespace(returncode=0, stdout="")
-
         try:
-            agentx.tmux = fake_tmux
+            agentx.tmux = lambda *parts, **kwargs: calls.append(parts)
             agentx.configure_status_spacing("example")
         finally:
             agentx.tmux = original_tmux
 
-        self.assertIn(("set-option", "-t", "example", "status", "3"), calls)
-        self.assertIn(
-            ("set-option", "-t", "example", "status-format[0]", "#[bg=default]"), calls
-        )
-        self.assertIn(
-            ("set-option", "-t", "example", "status-format[1]", "DEFAULT STATUS FORMAT"), calls
-        )
-        self.assertIn(
-            ("set-option", "-t", "example", "status-format[2]", "#[bg=default]"), calls
-        )
+        self.assertEqual(calls, [("set-option", "-t", "example", "status", "on")])
 
     def test_session_blocks_accidental_ctrl_d_but_allows_explicit_eof(self):
         original_tmux = agentx.tmux
@@ -282,7 +541,11 @@ class AgentXPureTests(unittest.TestCase):
         for profile in ("codex-1", "codex-2"):
             self.assertIn(
                 ("set-window-option", "-t", f"example:{profile}",
-                 "window-status-style", "fg=colour252,bg=colour239"), calls
+                 "window-status-style", "fg=colour244,bg=#20242e"), calls
+            )
+            self.assertIn(
+                ("set-window-option", "-t", f"example:{profile}",
+                 "window-status-current-format", " #[fg=colour233]#I  #W "), calls
             )
 
         prefix_one = next(
@@ -302,6 +565,18 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn('--session "#{session_name}"', ctrl_space[7])
         self.assertNotIn("/tmp/project", ctrl_space[7])
         self.assertEqual(ctrl_space[8], "send-keys C-Space")
+
+        cockpit = next(
+            call for call in calls if call[:4] == ("bind-key", "-T", "prefix", "x")
+        )
+        self.assertEqual(cockpit[4:7],
+                         ("if-shell", "-F", "#{m/r:^agentx-,#{session_name}}"))
+        self.assertIn("display-popup -w 100% -h 100% -E", cockpit[7])
+        self.assertIn('--session "#{session_name}"', cockpit[7])
+        self.assertIn('--current "#{window_name}"', cockpit[7])
+        self.assertIn('--client "#{client_name}"', cockpit[7])
+        self.assertNotIn(" -B ", f" {cockpit[7]} ")
+        self.assertEqual(cockpit[8], "")
 
     def test_project_bindings_are_identical_across_projects(self):
         original_tmux = agentx.tmux
@@ -330,6 +605,37 @@ class AgentXPureTests(unittest.TestCase):
         self.assertNotIn("/tmp/project-a", rendered)
         self.assertNotIn("/tmp/project b;safe", rendered)
         self.assertIn('#{session_name}', rendered)
+
+    def test_missing_profile_windows_do_not_leak_tmux_errors(self):
+        original_tmux = agentx.tmux
+        calls = []
+        config = {
+            "profiles": [
+                {"name": "codex-1", "kind": "codex", "command": "codex"},
+                {"name": "codex-2", "kind": "codex", "command": "codex"},
+                {"name": "agy", "kind": "agy", "command": "agy"},
+            ],
+            "settings": {},
+        }
+        try:
+            def fake_tmux(*parts, **kwargs):
+                calls.append((parts, kwargs))
+                return SimpleNamespace(returncode=0, stdout="")
+
+            agentx.tmux = fake_tmux
+            agentx.configure_session("agentx-example", Path("/tmp/project"), config)
+        finally:
+            agentx.tmux = original_tmux
+
+        profile_window_calls = [
+            (parts, kwargs)
+            for parts, kwargs in calls
+            if parts[:3] == ("set-window-option", "-t", "agentx-example:codex-2")
+            or parts[:3] == ("set-window-option", "-t", "agentx-example:agy")
+        ]
+        self.assertEqual(len(profile_window_calls), 10)
+        self.assertTrue(all(kwargs.get("check") is False for _, kwargs in profile_window_calls))
+        self.assertTrue(all(kwargs.get("capture") is True for _, kwargs in profile_window_calls))
 
     def test_runtime_project_resolves_and_validates_session_metadata(self):
         original_exists = agentx.tmux_session_exists
@@ -473,6 +779,60 @@ class AgentXPureTests(unittest.TestCase):
         self.assertTrue(respawns[0][3])
         self.assertEqual(messages[0][0], "display-message")
 
+    def test_recovery_prompt_detection_supports_pre_upgrade_sessions(self):
+        original_target = agentx.agent_pane_target
+        original_tmux = agentx.tmux
+        calls = []
+        try:
+            agentx.agent_pane_target = lambda target: "%1"
+            agentx.tmux = lambda *parts, **kwargs: (
+                calls.append(parts) or SimpleNamespace(
+                    returncode=0,
+                    stdout=("Error details\n\nAgent exited (status 1). "
+                            "Press Enter to resume, or Ctrl+C to\nstop.\n"),
+                )
+            )
+            self.assertTrue(agentx.pane_waiting_for_recovery(
+                "example", {"name": "codex-1", "dead": "0"},
+            ))
+            self.assertFalse(agentx.pane_waiting_for_recovery(
+                "example", {"name": "codex-1", "dead": "0", "agentx_state": "running"},
+            ))
+        finally:
+            agentx.agent_pane_target = original_target
+            agentx.tmux = original_tmux
+
+        self.assertEqual(len(calls), 1)
+
+    def test_new_reapplies_session_style_after_recreating_a_window(self):
+        args = type("Args", (), {
+            "project": str(MODULE_PATH.parent), "profile": "codex-2", "resume": True,
+        })()
+        originals = {
+            "load_config": agentx.load_config,
+            "create_session": agentx.create_session,
+            "respawn_profile": agentx.respawn_profile,
+            "configure_session": agentx.configure_session,
+            "attach_session": agentx.attach_session,
+        }
+        calls = []
+        config = {
+            "profiles": [{"name": "codex-2", "kind": "codex", "command": "codex"}],
+            "settings": {},
+        }
+        try:
+            agentx.load_config = lambda: config
+            agentx.create_session = lambda *parts, **kwargs: "example-session"
+            agentx.respawn_profile = lambda *parts, **kwargs: calls.append("respawn")
+            agentx.configure_session = lambda *parts, **kwargs: calls.append("configure")
+            agentx.attach_session = lambda *parts, **kwargs: calls.append("attach")
+            agentx.cmd_new(args)
+        finally:
+            for name, value in originals.items():
+                setattr(agentx, name, value)
+
+        self.assertEqual(calls, ["respawn", "configure", "attach"])
+
     def test_recover_does_not_replace_a_running_profile(self):
         args = type("Args", (), {"project": str(MODULE_PATH.parent), "profile": "codex-1"})()
         original_load = agentx.load_config
@@ -501,24 +861,221 @@ class AgentXPureTests(unittest.TestCase):
             agentx.tmux = original_tmux
         self.assertEqual(respawns, [])
 
+    def test_recover_all_restores_dead_waiting_and_missing_agents_only(self):
+        args = SimpleNamespace(
+            project=str(MODULE_PATH.parent), session=None, profile=None, all=True,
+        )
+        config = {
+            "profiles": [
+                {"name": "dead", "kind": "codex", "command": "codex"},
+                {"name": "waiting", "kind": "codex", "command": "codex"},
+                {"name": "running", "kind": "codex", "command": "codex"},
+                {"name": "missing", "kind": "agy", "command": "agy"},
+            ],
+            "settings": {},
+        }
+        originals = {
+            "load_config": agentx.load_config,
+            "tmux_session_exists": agentx.tmux_session_exists,
+            "current_window_states": agentx.current_window_states,
+            "respawn_profile": agentx.respawn_profile,
+            "pane_waiting_for_recovery": agentx.pane_waiting_for_recovery,
+            "agent_pane_target": agentx.agent_pane_target,
+            "configure_session": agentx.configure_session,
+            "tmux": agentx.tmux,
+        }
+        respawns = []
+        calls = []
+        configured = []
+        try:
+            agentx.load_config = lambda: config
+            agentx.tmux_session_exists = lambda name: True
+            agentx.current_window_states = lambda session: [
+                {"name": "dead", "dead": "1"},
+                {"name": "waiting", "dead": "0", "agentx_state": "exited"},
+                {"name": "running", "dead": "0", "agentx_state": "running"},
+            ]
+            agentx.respawn_profile = lambda session, profile, project, resume: respawns.append(
+                (profile.name, resume)
+            )
+            agentx.pane_waiting_for_recovery = lambda session, row: (
+                row.get("agentx_state") == "exited"
+            )
+            agentx.agent_pane_target = lambda target: f"main:{target}"
+            agentx.configure_session = lambda *parts: configured.append(parts)
+            agentx.tmux = lambda *parts, **kwargs: calls.append(parts)
+            agentx.cmd_recover(args)
+        finally:
+            for name, value in originals.items():
+                setattr(agentx, name, value)
+
+        self.assertEqual(respawns, [("dead", True), ("missing", True)])
+        self.assertIn(
+            ("send-keys", "-t", "main:" + agentx.session_name(MODULE_PATH.parent) + ":waiting",
+             "Enter"),
+            calls,
+        )
+        self.assertEqual(len(configured), 1)
+        message = next(call for call in calls if call[0] == "display-message")
+        self.assertIn("dead, waiting, missing", message[-1])
+        self.assertNotIn("running", message[-1])
+
+    def test_cockpit_renderer_is_bounded_adaptive_and_scrolls_unicode(self):
+        agents = [
+            CockpitAgent(f"profile-{index:02d}", "online", "CODEX")
+            for index in range(11)
+        ] + [CockpitAgent("协作代理十一", "dead", "AGY")]
+        for width, height in ((80, 24), (48, 16), (40, 12)):
+            with self.subTest(width=width, height=height):
+                output = render_cockpit(
+                    width, height, "语音情绪分析系统", "~/工作区/很长的项目路径",
+                    "0.5.0", agents, "profile-05", Theme(False), selected=11,
+                )
+                lines = output.split("\n")
+                self.assertEqual(len(lines), height)
+                self.assertTrue(all(display_width(line) <= width for line in lines))
+                self.assertIn("协作代理十一", output)
+                self.assertNotIn("profile-00", output)
+                self.assertNotIn("\033[", output)
+                self.assertEqual(
+                    output,
+                    render_cockpit(
+                        width, height, "语音情绪分析系统", "~/工作区/很长的项目路径",
+                        "0.5.0", agents, "profile-05", Theme(False), selected=11,
+                    ),
+                )
+
+        previous_no_color = os.environ.get("NO_COLOR")
+        try:
+            os.environ["NO_COLOR"] = "1"
+            no_color = render_cockpit(
+                80, 24, "项目", "~/项目", "0.5.0", agents,
+                "profile-05", Theme(True), selected=11,
+            )
+        finally:
+            if previous_no_color is None:
+                os.environ.pop("NO_COLOR", None)
+            else:
+                os.environ["NO_COLOR"] = previous_no_color
+        self.assertNotIn("\033[", no_color)
+
+    def test_cockpit_reducer_browse_semantics(self):
+        agents = [
+            CockpitAgent("current", "online"),
+            CockpitAgent("ready", "online"),
+            CockpitAgent("dead", "dead"),
+            CockpitAgent("missing", "missing"),
+        ]
+
+        state, action = reduce_cockpit_key(
+            agents, "current", CockpitState(selected=0), "2",
+        )
+        self.assertEqual(state, CockpitState(selected=1))
+        self.assertIsNone(action)
+
+        state, action = reduce_cockpit_key(agents, "current", state, "enter")
+        self.assertEqual(state, CockpitState(selected=1, mode="confirm"))
+        self.assertIsNone(action)
+
+        current_state, action = reduce_cockpit_key(
+            agents, "current", CockpitState(selected=0), "enter",
+        )
+        self.assertEqual(current_state.selected, 0)
+        self.assertEqual((action.kind, action.target), ("close", None))
+
+        dead_state, action = reduce_cockpit_key(
+            agents, "current", CockpitState(selected=2), "enter",
+        )
+        self.assertEqual(dead_state.selected, 2)
+        self.assertEqual((action.kind, action.target), ("switch", "dead"))
+
+        missing_state, action = reduce_cockpit_key(
+            agents, "current", CockpitState(), "4",
+        )
+        self.assertEqual(missing_state.selected, 3)
+        self.assertIn("agentx new missing", missing_state.error)
+        self.assertIsNone(action)
+
+        wrapped, action = reduce_cockpit_key(agents, "current", missing_state, "down")
+        self.assertEqual(wrapped.selected, 0)
+        self.assertIsNone(action)
+        _, action = reduce_cockpit_key(agents, "current", wrapped, "escape")
+        self.assertEqual((action.kind, action.target), ("close", None))
+
+    def test_cockpit_reducer_confirmation_semantics(self):
+        agents = [CockpitAgent("current"), CockpitAgent("target")]
+        confirm = CockpitState(selected=1, mode="confirm")
+
+        _, action = reduce_cockpit_key(agents, "current", confirm, "enter")
+        self.assertEqual((action.kind, action.target), ("transfer", "target"))
+        _, action = reduce_cockpit_key(agents, "current", confirm, "n")
+        self.assertEqual((action.kind, action.target), ("switch", "target"))
+
+        switch_state, action = reduce_cockpit_key(agents, "current", confirm, "right")
+        self.assertEqual(switch_state.confirm_index, 1)
+        self.assertIsNone(action)
+        _, action = reduce_cockpit_key(agents, "current", switch_state, "enter")
+        self.assertEqual((action.kind, action.target), ("switch", "target"))
+
+        cancel_state, action = reduce_cockpit_key(
+            agents, "current", CockpitState(1, "confirm", 2), "enter",
+        )
+        self.assertEqual(cancel_state, CockpitState(selected=1, mode="browse"))
+        self.assertIsNone(action)
+        _, action = reduce_cockpit_key(agents, "current", cancel_state, "ctrl-c")
+        self.assertEqual((action.kind, action.target), ("close", None))
+
+    def test_cockpit_arrow_decoder_does_not_consume_the_next_key(self):
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, b"\x1b[B\n")
+            self.assertEqual(_read_key(reader), "down")
+            self.assertEqual(_read_key(reader), "enter")
+        finally:
+            os.close(reader)
+            os.close(writer)
+
     def test_dashboard_and_statusline_render_saved_context(self):
-        workspace = {"git": {"branch": "feature/ui", "modified_files": ["a.py"],
+        workspace = {"timestamp": None,
+                     "git": {"branch": "feature/ui", "modified_files": ["a.py"],
                               "staged_files": ["b.py"], "untracked_files": ["c.py"]}}
         context = {"transfer": {"from_agent": "codex-1", "to_agent": "codex-2",
-                                "created_at": None, "file": "context-pack.md"}}
+                                "created_at": None, "file": "context-pack.md", "status": "injected"}}
         output = render_dashboard({"name": "demo"}, workspace, context, "", [], Theme(False), width=80)
         self.assertIn("AGENTX // CONTROL DECK", output)
         self.assertIn("PROJECT  demo", output)
         self.assertIn("SIGNAL   feature/ui  //  Δ 3", output)
         self.assertIn("codex-1 → codex-2", output)
         self.assertIn("context-pack.md", output)
+        self.assertIn("✓ INJECTED", output)
+        self.assertIn("UPDATED    never", output)
         self.assertIn("1 modified · 1 staged · 1 untracked", output)
-        self.assertEqual(render_statusline(workspace, context), "⌁ feature/ui  ◈ Δ3  ⟲ never")
+        self.assertEqual(render_statusline(workspace, context), "⌁ feature/ui  ◈ Δ3  ↻ never  ⟲ never")
 
         narrow = render_dashboard({"name": "a-very-long-project-name"}, workspace, context,
                                   "", [], Theme(False), width=48)
         self.assertTrue(all(len(line) <= 48 for line in narrow.splitlines()))
         self.assertNotIn("\033[", narrow)
+
+    def test_dashboard_sections_and_wide_unicode_keep_terminal_width(self):
+        workspace = {"timestamp": "2026-01-01T12:00:00+00:00",
+                     "git": {"branch": "功能/界面", "modified_files": ["界面.py"],
+                              "staged_files": [], "untracked_files": []}}
+        context = {"transfer": {"from_agent": "codex-一", "to_agent": "agy",
+                                "created_at": None, "file": "/tmp/上下文/context-pack.md",
+                                "status": "captured"}}
+        windows = [{"name": "编码代理一号", "active": "1", "dead": "0"}]
+        agents = render_dashboard({"name": "项目界面"}, workspace, context, "", windows,
+                                  Theme(False), width=48, section="agents")
+        context_view = render_dashboard({"name": "项目界面"}, workspace, context, "", windows,
+                                        Theme(False), width=48, section="context")
+        self.assertIn("AGENT MATRIX", agents)
+        self.assertNotIn("CONTEXT BUS", agents)
+        self.assertIn("CONTEXT BUS", context_view)
+        self.assertNotIn("AGENT MATRIX", context_view)
+        self.assertIn("context-pack.md", context_view)
+        self.assertTrue(all(display_width(line) <= 48 for line in agents.splitlines()))
+        self.assertTrue(all(display_width(line) <= 48 for line in context_view.splitlines()))
 
     def test_human_age(self):
         from datetime import timezone
@@ -565,6 +1122,23 @@ class AgentXPureTests(unittest.TestCase):
         self.assertIn(" M app.py", markdown)
         self.assertIn("/tmp/context/workspace.diff", markdown)
         self.assertIn("user request", markdown)
+
+    def test_local_memory_prefers_project_notes_and_formats_a_bounded_context_section(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "vault"
+            project = Path(temp) / "project"
+            project.mkdir()
+            initialise_memory(root)
+            project_note = add_memory(
+                root, "Queue decision", "Use the queue to isolate inference latency.", project,
+                ["architecture", "queue"],
+            )
+            add_memory(root, "General queue", "A generic note.", None, ["queue"])
+            notes = context_memory(root, project, "feature/queue", ["queue.py"])
+            self.assertEqual(notes[0].path, project_note)
+            self.assertIn("Queue decision", format_memory_section(notes, root))
+            self.assertIn("projects/project", format_memory_section(notes, root))
+            self.assertEqual(search_memory(root, "missing term", project)[0].path, project_note)
 
     def test_context_capture_is_local_and_writes_schema_v2(self):
         from agentxlib.models import WorkspaceSnapshot

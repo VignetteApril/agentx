@@ -49,7 +49,8 @@ def save_workspace(state_dir: Path, project: Path, snapshot: WorkspaceSnapshot,
 def save_context_pack(state_dir: Path, project: Path, from_agent: str,
                       to_agent: str | None, created_at: str, markdown: str,
                       snapshot: WorkspaceSnapshot, diff: str, staged_diff: str,
-                      recent_output: str, warnings: list[str] | None = None) -> Path:
+                      recent_output: str, warnings: list[str] | None = None,
+                      memory: dict[str, Any] | None = None) -> Path:
     directory, metadata = ensure_project(state_dir, project)
     archive_current(directory, str(metadata.get("last_active_agent") or from_agent))
     save_workspace(state_dir, project, snapshot, diff, staged_diff, recent_output)
@@ -65,6 +66,8 @@ def save_context_pack(state_dir: Path, project: Path, from_agent: str,
                       "staged_diff_file": "workspace-staged.diff",
                       "recent_output_file": "recent-output.txt"},
     }
+    if memory is not None:
+        context["memory"] = memory
     write_json(directory / "context.json", context)
     metadata.update({"last_active_agent": from_agent, "active_agent": from_agent,
                      "last_context_at": created_at})

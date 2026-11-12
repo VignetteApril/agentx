@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .memory import MemoryNote, format_memory_section
 from .models import WorkspaceSnapshot
 
 MAX_RECENT_OUTPUT_BYTES = 128 * 1024
@@ -40,7 +41,9 @@ def clean_terminal_output(text: str, *, max_lines: int = 300,
 def format_context_pack(snapshot: WorkspaceSnapshot, *, source_agent: str,
                         target_agent: str | None, created_at: str, directory: Path,
                         recent_output: str, output_truncated: bool,
-                        warnings: list[str] | None = None) -> str:
+                        warnings: list[str] | None = None,
+                        memory_notes: list[MemoryNote] | None = None,
+                        memory_root: Path | None = None) -> str:
     git_lines: list[str]
     if snapshot.git_root is None:
         git_lines = ["Git repository: unavailable"]
@@ -60,6 +63,7 @@ def format_context_pack(snapshot: WorkspaceSnapshot, *, source_agent: str,
     if output_truncated:
         warning_lines.append("Recent terminal output was truncated to its configured tail limit.")
     warning_block = "\n".join(f"- {item}" for item in warning_lines) or "- None"
+    memory_block = format_memory_section(memory_notes or [], memory_root or directory)
     return f"""# AgentX Context Pack
 
 Source Agent: {source_agent}
@@ -102,6 +106,10 @@ state what remains, then continue the task. Do not undo existing work without a 
 - Staged diff: {directory / 'workspace-staged.diff'}
 - Recent terminal output: {directory / 'recent-output.txt'}
 
+## Relevant Local Memory
+
+{memory_block}
+
 ## Collection Warnings
 
 {warning_block}
@@ -121,8 +129,10 @@ Read the deterministic Context Pack at:
 {context_dir}/context-pack.md
 
 The project working tree is the source of truth. Verify the pack with `git status`, `git diff`, and
-the actual files. Briefly state your understanding of the current request and remaining work, then
-continue without waiting for another handoff.
+the actual files. Review the "Relevant Local Memory" section for durable project decisions and
+constraints; treat it as guidance and resolve any conflict in favor of the working tree. Briefly
+state your understanding of the current request and remaining work, then continue without waiting
+for another handoff.
 """
 
 

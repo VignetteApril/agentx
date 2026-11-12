@@ -139,15 +139,17 @@ cd ~/projects/hermes
 agentx
 ```
 
-The first run creates a project-specific tmux session with one window per configured profile. Every agent starts in the same project directory:
+The first run creates a project-specific tmux session with one window per configured profile. Every agent starts in the same project directory, then AgentX opens a full-screen cockpit over the session:
 
 ```text
-0  codex-1
-1  codex-2
-2  agy
+1  codex-1
+2  codex-2
+3  agy
 ```
 
-Running `agentx` again from the same directory reconnects to that session instead of starting duplicate agents.
+Use the arrow keys or `1`–`9` to choose an agent and press `Enter`. Switching to a different live agent asks whether to capture and transfer a Context Pack first. `Esc` closes the cockpit without switching. Running `agentx` again reconnects to the same session and reopens the cockpit instead of starting duplicate agents.
+
+To bypass the cockpit and open one profile directly, use `agentx use <profile>` or `agentx open --profile <profile>`.
 
 ### Switch agents
 
@@ -161,6 +163,7 @@ You can also use `Ctrl+G`, release it, and then press a number to choose a speci
 
 ```text
 Ctrl+Space       Open the context-transfer switch menu
+Ctrl+G x         Open the AgentX cockpit
 Ctrl+G 1         Choose agent 1
 Ctrl+G 2         Choose agent 2
 Ctrl+G 3         Choose agent 3
@@ -169,13 +172,13 @@ Ctrl+G H         Show the current Context Pack
 Ctrl+G c         Open the Context Dashboard
 Ctrl+G a         Open the Agent Dashboard
 Ctrl+G r         Refresh the Workspace Snapshot
-Ctrl+G R         Recover the current agent after its pane exits
+Ctrl+G R         Recover all exited agents in the current project
 Ctrl+G Ctrl+D    Intentionally send Ctrl+D (EOF) to the agent
 Ctrl+G ?         Show keyboard help
 Ctrl+G d         Detach and leave all agents running
 ```
 
-A bare `Ctrl+D` is blocked to prevent an accidental agent exit. If an agent exits normally, its pane stays open with a recovery prompt: press `Enter` to resume the latest conversation, or `Ctrl+C` to stop. `Ctrl+G R` is available as a fallback if the outer recovery process also exits and the pane becomes dead.
+A bare `Ctrl+D` is blocked to prevent an accidental agent exit. If an agent exits normally, its pane stays open with a recovery prompt: press `Enter` to resume the latest conversation, or `Ctrl+C` to stop. Press `Ctrl+G R` from any window to resume every exited Agent in the current project at once; Agents that are still running are left untouched.
 
 ### Transfer context from the command line
 
@@ -191,6 +194,37 @@ AgentX captures the current Git state, diff, and recent terminal output locally.
 The target agent is instructed to treat the actual working tree as the source of truth and verify it with `git status` and `git diff`.
 
 > All agents in a project share the same working tree. Avoid asking two agents to edit the same files at the same time unless you are comfortable resolving overlapping changes.
+
+### Local memory (Obsidian-compatible)
+
+AgentX can keep durable project decisions, architecture notes, and recurring gotchas in a local Markdown vault. It selects up to three relevant notes and includes them in every Context Pack, so the next agent can recover decisions that are not visible in the Git diff.
+
+Create the default local vault once:
+
+```bash
+agentx memory init
+agentx memory add "API convention" --tag architecture --note "Use JSON error envelopes for all API failures."
+agentx memory search "API error convention"
+```
+
+The default vault is `~/.agentx/memory`; open that folder with Obsidian if you prefer its graph, editor, and search UI. Project notes created by `agentx memory add` are automatically scoped to the current project. You can point AgentX at an existing Obsidian vault instead:
+
+```bash
+agentx config set-memory-path ~/Documents/Obsidian/AgentX
+```
+
+For manually-authored notes, use simple frontmatter to associate a note with a project:
+
+```markdown
+---
+project: /absolute/path/to/project
+tags: architecture, decision
+---
+
+# Why we use the queue
+
+The queue keeps browser requests independent from model inference latency.
+```
 
 ## Leave and come back later
 
@@ -262,10 +296,11 @@ agentx keys
 agentx logs codex-1
 agentx logs codex-2 --lines 500
 
-# Restart or recover one agent
+# Restart one agent, or recover one/all exited agents
 agentx new codex-1
 agentx new codex-1 --resume
 agentx recover codex-1
+agentx recover --all
 
 # Leave agents running, or stop the whole project session
 agentx detach
@@ -341,12 +376,14 @@ Actual working tree and Git state
 
 ## Terminal UI
 
-AgentX keeps the native agent interface and adds a compact control layer through tmux.
+AgentX keeps the native agent interface and adds a dark, keyboard-driven control layer through tmux.
 
-- The status bar shows the project, active agent, branch, change count, and latest context age.
+- The full-screen cockpit uses the AgentX cyan and purple palette to select an agent without replacing its native interface.
+- The single-line footer shows the project path, active agent, branch, change count, latest context age, and AgentX version.
 - The active agent tab uses a cyan background; inactive agent tabs use gray.
-- Each agent window has a thin configurable frame with its agent and project name.
+- Each agent window has a subtle neutral frame with an accent title for its agent and project name.
 - Dashboards and help open in lightweight popups.
+- The mouse wheel keeps native agent scrolling. Full-screen agents without mouse reporting receive PageUp/PageDown instead; ordinary shell output uses tmux scrollback.
 - Layouts remain readable in narrow terminals and with ANSI colors disabled.
 
 ```text
@@ -368,12 +405,12 @@ AgentX keeps the native agent interface and adds a compact control layer through
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
-The frame uses input-disabled one-cell helper panes on the left, right, and bottom. Clicking one returns focus to the main agent pane, while context capture, recovery, and logs continue to target the correct pane.
+The Agent pane takes the full width with no side or bottom gutters. The top title remains, and the single-line footer sits directly below the Agent content; context capture, recovery, and logs continue to target the correct pane.
 
 Customize the frame:
 
 ```bash
-agentx config set-frame-color '#22d3ee'
+agentx config set-frame-color '#22d3ee'  # title accent
 agentx config set-frame-background '#111827'
 agentx config set-frame-background default
 agentx config set-frame off
