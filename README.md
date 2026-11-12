@@ -130,6 +130,23 @@ Review all configured profiles at any time:
 agentx accounts
 ```
 
+### Windows desktop controller (Rust)
+
+The native Windows x64 controller retains the same profile layout and the official
+client interface. One `AgentX.exe` starts two independently signed-in clients and
+adds an account tab bar for window switching and position tracking. Closing the
+bar restores client windows while keeping their processes running.
+
+Download the portable Windows x64 ZIP from [GitHub Releases](https://github.com/VignetteApril/agentx/releases).
+The EXE, native windows, tray, and desktop shortcut use the AgentX icon. Run the
+included shortcut helper to create a desktop entry.
+
+Build and package with `python scripts/build-windows-desktop.py`.
+See [Windows usage and validation](desktop/rust/WINDOWS.md) for setup,
+diagnostics, build instructions, and the distinction between fixture tests and
+real official-client account validation. The Rust implementation uses native Win32
+APIs. The terminal session manager uses its existing entry point.
+
 ## Quick start
 
 Move into a project and start AgentX:

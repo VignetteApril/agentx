@@ -1,0 +1,74 @@
+name: Windows desktop controller
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-v*'
+  pull_request:
+    paths:
+      - 'desktop/rust/**'
+      - 'scripts/build-windows-desktop.py'
+      - '.github/workflows/windows-desktop.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Check release tag matches the Rust version
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: python
+        run: |
+          import os, pathlib, re
+          manifest = pathlib.Path('desktop/rust/Cargo.toml').read_text()
+          version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest).group(1)
+          assert os.environ['GITHUB_REF_NAME'] == 'desktop-v' + version, 'Release tag/version mismatch'
+      - name: Lint native Windows code
+        run: cargo clippy --manifest-path desktop/rust/Cargo.toml --all-targets -- -D warnings
+      - name: Build and exercise local fixture windows
+        run: python scripts/build-windows-desktop.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: AgentX-Windows-x64
+          path: |
+            .build/windows/*.zip
+            .build/windows/*.sha256
+            .build/windows/AgentX-Windows-x64/window-test.json
+          if-no-files-found: error
+          include-hidden-files: true
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: windows-x64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: AgentX-Windows-x64
+          path: .build/release-native
+      - name: Publish the verified Windows package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            .build/release-native/*.zip .build/release-native/*.sha256 \
+            --verify-tag \
+            --title "AgentX Desktop ${RELEASE_TAG#desktop-v} - Windows x64" \
+            --notes-file desktop/rust/RELEASE_NOTES.md \
+            --latest
