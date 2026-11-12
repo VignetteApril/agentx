@@ -39,12 +39,14 @@ jobs:
       - name: Build and exercise local fixture windows
         run: python scripts/build-windows-desktop.py
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: AgentX-Windows-x64
           path: |
             .build/windows/*.zip
             .build/windows/*.sha256
             .build/windows/AgentX-Windows-x64/window-test.json
+            .build/windows/AgentX-Windows-x64/AgentX.exe
           if-no-files-found: error
           include-hidden-files: true
 

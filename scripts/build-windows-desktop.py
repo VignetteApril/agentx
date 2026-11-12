@@ -144,10 +144,10 @@ def main() -> None:
     runtime_check = {"status": "not_run", "reason": "The build host is not Windows."}
     if platform.system() == "Windows":
         report = destination / "window-test.json"
-        subprocess.run([str(staged), "--self-test", str(report)], check=True, timeout=30)
+        completed = subprocess.run([str(staged), "--self-test", str(report)], timeout=30)
         checks = json.loads(report.read_text(encoding="utf-8-sig"))
         required = ["first_tab", "second_tab", "restore_on_close", "different_processes", "clients_remain_running", "hidden_helpers_remain_hidden", "application_icon_loaded"]
-        if not all(checks.get(key) is True for key in required):
+        if completed.returncode or not all(checks.get(key) is True for key in required):
             raise RuntimeError(f"Native window validation failed: {checks}")
         runtime_check = {"status": "passed", "scope": "local fixture windows; no official account requests", "checks": checks}
     readme = ROOT / "desktop/rust/WINDOWS.md"
