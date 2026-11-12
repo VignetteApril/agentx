@@ -883,6 +883,15 @@ unsafe extern "system" fn fixture_proc(
     }
 }
 
+fn hidden_fixture_window(pid: u32) -> HWND {
+    unsafe {
+        FindWindowW(
+            wide(&format!("AgentXHiddenWindowFixture-{pid}")).as_ptr(),
+            null(),
+        )
+    }
+}
+
 pub fn fixture(index: usize) -> Result<()> {
     unsafe {
         let class = wide(&format!("AgentXWindowFixture-{}", std::process::id()));
@@ -938,15 +947,17 @@ pub fn fixture(index: usize) -> Result<()> {
         }
         // Match Electron's hidden, untitled helper: it is larger than the real
         // window and must never become the target for focus or bar placement.
+        let helper_class = wide(&format!("AgentXHiddenWindowFixture-{}", std::process::id()));
+        register(&helper_class, Some(fixture_proc))?;
         let helper = CreateWindowExW(
             0,
-            class.as_ptr(),
+            helper_class.as_ptr(),
             wide("").as_ptr(),
             WS_OVERLAPPEDWINDOW,
             60,
             60,
-            1300,
-            900,
+            1000,
+            700,
             null_mut(),
             null_mut(),
             GetModuleHandleW(null()),
@@ -972,6 +983,7 @@ pub fn self_test(report: &Path) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(12);
         while clients.iter().any(|c| {
             c.main_window().is_none()
+                || hidden_fixture_window(c.instance.pid).is_null()
                 || backend::process_windows(c.instance.pid)
                     .iter()
                     .filter(|w| w.visible)
@@ -1003,15 +1015,11 @@ pub fn self_test(report: &Path) -> Result<()> {
         let restored = clients
             .iter()
             .all(|c| c.main_window().is_some_and(|w| w.visible));
+        // Windows can constrain initial window sizes on small CI/RDP desktops.
+        // Identify the helper directly instead of assuming fixed dimensions.
         let hidden_helpers_remain_hidden = clients.iter().all(|client| {
-            backend::process_windows(client.instance.pid)
-                .iter()
-                .any(|w| {
-                    !w.primary
-                        && !w.visible
-                        && w.rect.right - w.rect.left > 1100
-                        && w.rect.bottom - w.rect.top > 700
-                })
+            let helper = hidden_fixture_window(client.instance.pid);
+            !helper.is_null() && unsafe { IsWindowVisible(helper) == 0 }
         });
         Ok(
             serde_json::json!({"first_tab":first, "second_tab":second, "restore_on_close":restored,
@@ -1019,6 +1027,8 @@ pub fn self_test(report: &Path) -> Result<()> {
             "clients_remain_running":clients.iter().all(|c| c.alive()),
             "hidden_helpers_remain_hidden":hidden_helpers_remain_hidden,
             "application_icon_loaded":unsafe { !super::app_icon(false).is_null() && !super::app_icon(true).is_null() },
+            "screen_width":unsafe { GetSystemMetrics(SM_CXSCREEN) },
+            "screen_height":unsafe { GetSystemMetrics(SM_CYSCREEN) },
             "uses_official_client":false, "sends_account_requests":false}),
         )
     };

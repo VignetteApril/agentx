@@ -1,6 +1,6 @@
 [package]
 name = "agentx-desktop"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 description = "Native account tabs around independently signed-in official Codex clients"
 publish = false
